@@ -18,8 +18,8 @@ import copy
 #Implements the layer-normalization-layer in the transformer architecture.
 #Not a class as it isnt parameterized.
 def layerNorm(x):
-    std_mean = torch.std_mean(x, dim = 0)
-    return (x - std_mean[1]) / (std_mean[0] + 0.0001)
+    std_mean = torch.std_mean(x, dim = -1, unbiased=False, keepdim=True)
+    return (x - std_mean[1]) / (std_mean[0] + 0.001)
 
 class MultiHeadAttention(nn.Module):
     def __init__(self, h, d_model):

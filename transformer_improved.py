@@ -12,6 +12,7 @@
 # - Xavier-Initialization for the Weight-Matrices (so that they are initilaized with unit standard deviation) and Kaiming-Initialization for the ANN-Matrices
 # - Initialization of the bias weights to be zero instead of one
 # - QoL: Being able to save and retrieve the parameters of the model ---
+# - Being able to run on (currently only one) a gpu for enhanced processing power
 
 import torch
 import torch.nn as nn
@@ -22,15 +23,17 @@ from torch.nn.parameter import Parameter
 import math
 import copy
 
+device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+
 #"-------------------------------- Low-Level Transformer Methods ------------------------------------------------"
 #Implements the layer-normalization-layer in the transformer architecture.
 #Not a class as it isnt parameterized.
 def layerNorm(x):
-    std_mean = torch.std_mean(x, dim = 0)
-    return (x - std_mean[1]) / (std_mean[0] + 0.0001)
+    std_mean = torch.std_mean(x, dim = -1, unbiased=False, keepdim=True)
+    return (x - std_mean[1]) / (std_mean[0] + 0.001)
 
 def dropout_func(x, dropout):
-    dropout_chances = torch.rand(x.shape)
+    dropout_chances = torch.rand(x.shape).to(device)
     dropout_mask = dropout_chances > dropout
     return (x * dropout_mask) / (1-dropout)
 
@@ -86,8 +89,8 @@ class MultiHeadAttention(nn.Module):
 class MaskedMultiHeadAttention(MultiHeadAttention):
     def attention(self, Q, K, V, dropout = 0, mask_indices = None):
         #Causal mask used in the decoder to prevent attention to future outputs
-        causal_mask = (torch.tril(torch.ones(Q.shape[1], K.shape[1])) == 0) * (-1e+19) #Fills all values above the diagonal with large negative values to be ignored during softmax
-        padding_mask = torch.zeros(V.shape[0], Q.shape[1], K.shape[1])
+        causal_mask = (torch.tril(torch.ones(Q.shape[1], K.shape[1])) == 0).to(device) * (-1e+19) #Fills all values above the diagonal with large negative values to be ignored during softmax
+        padding_mask = torch.zeros(V.shape[0], Q.shape[1], K.shape[1]).to(device)
         #Padding-mask for the values in the decoder 
         if mask_indices != None:
             for i in range(V.shape[0]):
@@ -111,9 +114,9 @@ class ANNLayer(nn.Module):
 #"-------------------------------- Higher-Level Transformer-Components ------------------------------------------------"
 def postionalEncoding(X):
     #Creates a 'transposed vector' of the sequence positions from 0 to the amount of sequence members
-    pos_vec = torch.arange(0, X.shape[1]).unsqueeze(1)
-    div_vec = torch.float_power(torch.tensor(10000), torch.arange(0, X.shape[2], 2) / X.shape[2] * (-1))
-    pos_enc = torch.empty(X.shape[1], X.shape[2])
+    pos_vec = torch.arange(0, X.shape[1]).unsqueeze(1).to(device)
+    div_vec = torch.float_power(torch.tensor(10000), torch.arange(0, X.shape[2], 2) / X.shape[2] * (-1)).to(device)
+    pos_enc = torch.empty(X.shape[1], X.shape[2]).to(device)
     pos_enc[:, 0::2] = torch.sin(pos_vec * div_vec)
     pos_enc[:, 1::2] = torch.cos(pos_vec * div_vec)
     return X + pos_enc
@@ -206,7 +209,7 @@ class Transformer(nn.Module):
             self.decoder = nn.ModuleList([DecoderLayer(dim_ann, n_head, d_model, enc_layers > 0) for i in range(dec_layers)])
         self.output_layer = output_layer(d_model, d_output)
 
-    #Input: batchsize x seq_length x 
+    #Input: batchsize x seq_length x d_input
     #Output: Indices of pure zero rows used for masking
     def masked_rows_indices(self, input):
         zero_rows_mask = torch.all(input == 0, dim=-1)
@@ -249,8 +252,11 @@ class Transformer(nn.Module):
         output = self.output_layer(curr_repr)
         for i in range(output.shape[0]):
             output[i, output_mask_rows[i], :] = 0
-        #Return everything but the arbitrarily formed start-of-sequence-token and mask the padding values to zero so that they have no error during training
-        return output[:, 1:, :]
+        #Return everything but the arbitrarily formed start-of-sequence-token (if exists) and mask the padding values to zero so that they have no error during training
+        if add_token == True:
+            return output[:, 1:, :]
+        else:
+            return output
     
     #Returns the last n predictions batched as a list of torch arrays
     def get_prediction(self, X, output, dropout = 0, add_token = True, num_tokens = 1):
@@ -281,7 +287,7 @@ class Transformer(nn.Module):
             if inputs[i].shape[0] > self.max_seq_length:
                 inputs[i] = inputs[i][0:self.max_seq_length]
         #Padding the last value to the maximum for the inputs
-        inputs[-1] = torch.cat([inputs[-1], torch.zeros(self.max_seq_length - inputs[-1].shape[0], inputs[-1].shape[1])], dim = 0)
+        inputs[-1] = torch.cat([inputs[-1].to(device), torch.zeros(self.max_seq_length - inputs[-1].shape[0], inputs[-1].shape[1]).to(device)], dim = 0)
 
         #Padding the remaining sequences with length <= max_seq_length to the desired dimensions, outputs a batch x seq x d torch tensor
         return torch.nn.utils.rnn.pad_sequence(inputs, batch_first=True)
